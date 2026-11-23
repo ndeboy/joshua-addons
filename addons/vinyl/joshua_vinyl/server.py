@@ -2,8 +2,9 @@
 
 The shape is the hello addon's. MCP is at ``/mcp``, the streamable-HTTP
 transport the joshua-ai gateway expects from a ``type: http`` upstream.
-``GET /healthz`` stays open. ``/mcp`` needs ``Authorization: Bearer
-<ADDON_TOKEN>`` when ``ADDON_TOKEN`` is set. The interface at ``/``, the
+``GET /healthz`` stays open. ``/mcp`` and ``/api/plays`` (the one route outside
+MCP that writes) need ``Authorization: Bearer <ADDON_TOKEN>`` when
+``ADDON_TOKEN`` is set. The interface at ``/``, the
 bundle at ``/bundle``, the art at ``/art``, and ``/api/status`` are open, the
 same posture as the pantry UI: the docker network or the ingress is the
 boundary, not this addon.
@@ -39,6 +40,8 @@ from joshua_vinyl.sync import META_LAST_RESULT, META_LAST_SYNC, migrate_override
 logger = get_logger("vinyl")
 
 PROTECTED_PREFIX = "/mcp"
+# The play log over plain HTTP. It writes, so it takes the token too.
+PLAYS_PATH = "/api/plays"
 
 # How long the addon remembers a suggestion, so the same record does not come
 # up twice in a fortnight.
@@ -488,6 +491,31 @@ def vinyl_return(release_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def vinyl_log_play(release_id: int) -> dict[str, Any]:
+    """Record that one record is on the turntable now.
+
+    Use it when a person says what they are playing. A turntable console can
+    report the same thing by itself; a second report of the same listen adds
+    nothing. Nothing is written to Discogs.
+    """
+    with _database() as conn:
+        return intake.record_play(conn, release_id=int(release_id), source="joshua")
+
+
+@mcp.tool()
+def vinyl_played(limit: int = 10) -> dict[str, Any]:
+    """List the records played most recently, newest first.
+
+    Use it for a question about what the house listened to lately. Each record
+    carries the time of its last play and the number of times it was played.
+    Only a play that was reported is here, so an empty list does not mean
+    that nothing was played.
+    """
+    with _database() as conn:
+        return intake.played(conn, limit)
+
+
+@mcp.tool()
 def vinyl_lent_out() -> dict[str, Any]:
     """List every record that is out with somebody, and who has it."""
     with _database() as conn:
@@ -585,7 +613,7 @@ def vinyl_corrections() -> dict[str, Any]:
 
 
 class BearerAuthMiddleware:
-    """Require ``Authorization: Bearer <token>`` on ``PROTECTED_PREFIX`` only.
+    """Require ``Authorization: Bearer <token>`` on ``/mcp`` and ``/api/plays`` only.
 
     Skips the check entirely when ``token`` is ``None`` (no ``ADDON_TOKEN``
     configured): the docker network is the boundary in that case.
@@ -597,7 +625,11 @@ class BearerAuthMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
-        protected = path == PROTECTED_PREFIX or path.startswith(PROTECTED_PREFIX + "/")
+        protected = (
+            path == PROTECTED_PREFIX
+            or path.startswith(PROTECTED_PREFIX + "/")
+            or path == PLAYS_PATH
+        )
         if scope["type"] != "http" or self.token is None or not protected:
             await self.app(scope, receive, send)
             return
@@ -623,7 +655,32 @@ async def api_status(request: Request) -> Response:
     return JSONResponse(status(_current_settings()))
 
 
+async def api_plays(request: Request) -> Response:
+    """The play log: ``GET`` lists it, ``POST {"release_id": n}`` adds to it."""
+    if request.method == "GET":
+        try:
+            limit = int(request.query_params.get("limit", "10"))
+        except ValueError:
+            return JSONResponse({"error": "limit must be a number"}, status_code=400)
+        with _database() as conn:
+            return JSONResponse(intake.played(conn, limit))
+    try:
+        body = await request.json()
+        release_id = int(body["release_id"])
+    except (ValueError, KeyError, TypeError):
+        return JSONResponse({"error": "send a JSON object with release_id"}, status_code=400)
+    source = body.get("source")
+    with _database() as conn:
+        result = intake.record_play(
+            conn,
+            release_id=release_id,
+            source=str(source)[:40] if source else None,
+        )
+    return JSONResponse(result, status_code=404 if "error" in result else 200)
+
+
 mcp.custom_route("/healthz", methods=["GET"])(healthz)
+mcp.custom_route(PLAYS_PATH, methods=["GET", "POST"])(api_plays)
 mcp.custom_route("/api/status", methods=["GET"])(api_status)
 
 

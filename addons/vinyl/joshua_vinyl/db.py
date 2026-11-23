@@ -6,9 +6,10 @@ cache, keyed by artist name) and ``meta`` (the last sync). The collection
 itself lives on Discogs, so the file is fully reconstructible, and it is
 never in the critical path of a backup.
 
-Two tables hold what Discogs cannot: ``suggestions``, which is how the same
-record is not suggested twice in a fortnight, and ``loans``, which is who has
-a record that is off the shelf. A sync never clears either one.
+Three tables hold what Discogs cannot: ``suggestions``, which is how the same
+record is not suggested twice in a fortnight, ``loans``, which is who has
+a record that is off the shelf, and ``plays``, which is when a record was
+on the turntable. A sync never clears any of them.
 """
 
 from __future__ import annotations
@@ -85,6 +86,13 @@ CREATE TABLE IF NOT EXISTS loans (
     since TEXT NOT NULL,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS plays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id INTEGER NOT NULL,
+    played_at TEXT NOT NULL,
+    source TEXT
+);
+CREATE INDEX IF NOT EXISTS plays_by_time ON plays (played_at);
 CREATE TABLE IF NOT EXISTS artists (
     name TEXT PRIMARY KEY,
     sort_name TEXT NOT NULL,
@@ -303,6 +311,7 @@ def delete_album(conn: sqlite3.Connection, release_id: int) -> bool:
         ("prices", "release_id"),
         ("tags", "release_id"),
         ("loans", "release_id"),
+        ("plays", "release_id"),
     ):
         conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (release_id,))
     return found
@@ -322,6 +331,37 @@ def recent_suggestions(conn: sqlite3.Connection, since: str) -> set[int]:
         "SELECT DISTINCT release_id FROM suggestions WHERE suggested_at >= ?", (since,)
     )
     return {int(row["release_id"]) for row in rows}
+
+
+def log_play(
+    conn: sqlite3.Connection, release_id: int, played_at: str, source: str | None = None
+) -> None:
+    """Record that this record was on the turntable at ``played_at``."""
+    conn.execute(
+        "INSERT INTO plays (release_id, played_at, source) VALUES (?, ?, ?)",
+        (release_id, played_at, source),
+    )
+
+
+def last_play(conn: sqlite3.Connection, release_id: int) -> str | None:
+    """When this record was last on the turntable, or None."""
+    row = conn.execute(
+        "SELECT MAX(played_at) AS played_at FROM plays WHERE release_id = ?", (release_id,)
+    ).fetchone()
+    return row["played_at"] if row else None
+
+
+def recent_plays(conn: sqlite3.Connection, limit: int) -> list[dict[str, Any]]:
+    """The records played most recently, newest first, one row for each record.
+
+    Each row carries the time of the last play and the number of plays.
+    """
+    rows = conn.execute(
+        "SELECT release_id, MAX(played_at) AS played_at, COUNT(*) AS plays FROM plays"
+        " GROUP BY release_id ORDER BY played_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def set_loan(

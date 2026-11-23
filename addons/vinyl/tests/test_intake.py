@@ -524,3 +524,54 @@ def test_removing_a_record_forgets_the_loan(data_dir: Path, without_folsom) -> N
         assert db.get_loan(conn, PICTURE_DISC) is None
     finally:
         conn.close()
+
+
+def _play(data_dir: Path, release_id: int, at: str) -> dict[str, Any]:
+    from datetime import datetime
+
+    conn = db.connect(data_dir / "vinyl.db")
+    try:
+        return intake.record_play(
+            conn, release_id=release_id, source="parlor", now=datetime.fromisoformat(at)
+        )
+    finally:
+        conn.close()
+
+
+def _played(data_dir: Path, limit: int = 10) -> dict[str, Any]:
+    conn = db.connect(data_dir / "vinyl.db")
+    try:
+        return intake.played(conn, limit)
+    finally:
+        conn.close()
+
+
+def test_one_listen_is_one_play_however_often_it_is_reported(
+    data_dir: Path, without_folsom
+) -> None:
+    first = _play(data_dir, PICTURE_DISC, "2026-11-23T19:00:00+00:00")
+    side_two = _play(data_dir, PICTURE_DISC, "2026-11-23T19:25:00+00:00")
+    next_day = _play(data_dir, PICTURE_DISC, "2026-11-24T19:00:00+00:00")
+    assert first["logged"] is True
+    assert side_two["logged"] is False
+    assert side_two["same_listen"] is True
+    assert next_day["logged"] is True
+    listed = _played(data_dir)
+    assert listed["count"] == 1
+    assert listed["records"][0]["id"] == PICTURE_DISC
+    assert listed["records"][0]["plays"] == 2
+    assert listed["records"][0]["played_at"] == "2026-11-24T19:00:00+00:00"
+    assert listed["records"][0]["title"]
+
+
+def test_a_play_of_a_record_the_house_does_not_own_says_so(data_dir: Path, without_folsom) -> None:
+    result = _play(data_dir, _folsom_id(), "2026-11-23T19:00:00+00:00")
+    assert result["logged"] is False
+    assert "is in the collection" in result["error"]
+    assert _played(data_dir) == {"count": 0, "records": []}
+
+
+def test_removing_a_record_forgets_its_plays(data_dir: Path, without_folsom) -> None:
+    _play(data_dir, PICTURE_DISC, "2026-11-23T19:00:00+00:00")
+    _remove(data_dir, without_folsom, PICTURE_DISC, confirm=True)
+    assert _played(data_dir) == {"count": 0, "records": []}

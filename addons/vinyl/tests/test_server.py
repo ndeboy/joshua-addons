@@ -165,9 +165,11 @@ async def test_the_tool_list_is_the_documented_set(app_factory, synced: Path) ->
         "vinyl_label_images",
         "vinyl_lend",
         "vinyl_lent_out",
+        "vinyl_log_play",
         "vinyl_lookup",
         "vinyl_owned",
         "vinyl_pick",
+        "vinyl_played",
         "vinyl_recent",
         "vinyl_remove",
         "vinyl_return",
@@ -378,6 +380,68 @@ async def test_lending_and_returning_need_no_discogs_token(app_factory, synced: 
         picked.structured_content["record"]["id"] != 7590859
     )
     assert back.structured_content["returned"] is True
+
+
+async def test_a_play_is_logged_over_http_and_joshua_can_list_it(app_factory, synced: Path) -> None:
+    app = app_factory(None)
+    async with _client(app) as client:
+        first = await client.post("/api/plays", json={"release_id": 7590859, "source": "parlor"})
+        again = await client.post("/api/plays", json={"release_id": 7590859})
+        listed = await client.get("/api/plays?limit=5")
+    assert first.status_code == 200
+    assert first.json()["logged"] is True
+    # The second report of the same listen adds no play.
+    assert again.json() == {
+        "logged": False,
+        "same_listen": True,
+        "record": first.json()["record"],
+        "played_at": first.json()["played_at"],
+    }
+    assert [(r["id"], r["plays"]) for r in listed.json()["records"]] == [(7590859, 1)]
+    async with mcp_session(app) as session:
+        played = await session.call_tool("vinyl_played", {})
+    assert played.structured_content["count"] == 1
+    assert played.structured_content["records"][0]["id"] == 7590859
+
+
+async def test_joshua_can_log_a_play(app_factory, synced: Path) -> None:
+    app = app_factory(None)
+    async with mcp_session(app) as session:
+        logged = await session.call_tool("vinyl_log_play", {"release_id": 7590859})
+        played = await session.call_tool("vinyl_played", {"limit": 3})
+    assert logged.structured_content["logged"] is True
+    assert played.structured_content["records"][0]["plays"] == 1
+
+
+async def test_a_play_of_a_record_the_house_does_not_own_is_refused(
+    app_factory, synced: Path
+) -> None:
+    async with _client(app_factory(None)) as client:
+        unknown = await client.post("/api/plays", json={"release_id": 1})
+        no_id = await client.post("/api/plays", json={"record": 7590859})
+        not_json = await client.post("/api/plays", content=b"7590859")
+        listed = await client.get("/api/plays")
+    assert unknown.status_code == 404
+    assert unknown.json()["logged"] is False
+    assert no_id.status_code == 400
+    assert not_json.status_code == 400
+    assert listed.json() == {"count": 0, "records": []}
+
+
+async def test_the_play_log_takes_the_token_when_one_is_set(app_factory, synced: Path) -> None:
+    async with _client(app_factory("right-token")) as client:
+        missing = await client.post("/api/plays", json={"release_id": 7590859})
+        wrong = await client.get("/api/plays", headers={"Authorization": "Bearer wrong"})
+        right = await client.post(
+            "/api/plays",
+            json={"release_id": 7590859},
+            headers={"Authorization": "Bearer right-token"},
+        )
+        status = await client.get("/api/status")
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+    assert right.status_code == 200
+    assert status.status_code == 200
 
 
 async def test_the_same_record_is_not_suggested_twice(app_factory, synced: Path) -> None:

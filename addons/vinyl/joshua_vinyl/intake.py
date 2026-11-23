@@ -25,7 +25,7 @@ shelf page without a sync.
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -427,6 +427,62 @@ def lend_record(
         "to": person,
         "since": started.isoformat(timespec="seconds"),
     }
+
+
+# One listen is one play. A record that goes on the platter again inside this
+# time (the other side, or a second report of the same listen) adds nothing.
+SAME_LISTEN = timedelta(hours=3)
+
+MAX_PLAYS_LISTED = 50
+
+
+def record_play(
+    conn: sqlite3.Connection,
+    *,
+    release_id: int,
+    source: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Record that one record is on the turntable now.
+
+    The report can come more than once for the same listen: a console reports
+    when the record goes on, and can report again when the side is turned. A
+    second report inside ``SAME_LISTEN`` is the same play, so it adds no row.
+    Nothing is written to Discogs, and the bundle does not change.
+    """
+    started = now or datetime.now(UTC)
+    album = db.get_album(conn, release_id)
+    if album is None:
+        return {
+            "logged": False,
+            "error": f"No record with id {release_id} is in the collection.",
+        }
+    record = {"id": release_id, "title": album["title"], "artist": album["artist"]}
+    last = db.last_play(conn, release_id)
+    if last is not None and started - datetime.fromisoformat(last) < SAME_LISTEN:
+        return {"logged": False, "same_listen": True, "record": record, "played_at": last}
+    played_at = started.isoformat(timespec="seconds")
+    db.log_play(conn, release_id, played_at, source)
+    conn.commit()
+    return {"logged": True, "record": record, "played_at": played_at}
+
+
+def played(conn: sqlite3.Connection, limit: int = 10) -> dict[str, Any]:
+    """The records played most recently, newest first, with the play count of each."""
+    limit = max(1, min(limit, MAX_PLAYS_LISTED))
+    records = []
+    for row in db.recent_plays(conn, limit):
+        album = db.get_album(conn, row["release_id"])
+        records.append(
+            {
+                "id": row["release_id"],
+                "title": album["title"] if album else None,
+                "artist": album["artist"] if album else None,
+                "played_at": row["played_at"],
+                "plays": row["plays"],
+            }
+        )
+    return {"count": len(records), "records": records}
 
 
 def return_record(

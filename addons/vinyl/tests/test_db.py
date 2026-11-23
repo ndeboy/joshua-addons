@@ -186,3 +186,20 @@ def test_deleting_an_album_takes_its_rows_with_it(tmp_path) -> None:
         assert db.delete_album(conn, 12345) is False
     finally:
         conn.close()
+
+
+def test_plays_are_listed_newest_first_with_their_count(tmp_path) -> None:
+    conn = db.connect(tmp_path / "vinyl.db")
+    try:
+        db.log_play(conn, 11, "2026-11-01T20:00:00+00:00", "parlor")
+        db.log_play(conn, 22, "2026-11-02T20:00:00+00:00")
+        db.log_play(conn, 11, "2026-11-03T20:00:00+00:00", "parlor")
+        assert db.last_play(conn, 11) == "2026-11-03T20:00:00+00:00"
+        assert db.last_play(conn, 33) is None
+        assert db.recent_plays(conn, 10) == [
+            {"release_id": 11, "played_at": "2026-11-03T20:00:00+00:00", "plays": 2},
+            {"release_id": 22, "played_at": "2026-11-02T20:00:00+00:00", "plays": 1},
+        ]
+        assert len(db.recent_plays(conn, 1)) == 1
+    finally:
+        conn.close()

@@ -68,8 +68,8 @@ The addon serves MCP at `POST /mcp` (streamable HTTP) on port 8000, and
 answers `GET /healthz` with `{"ok": true}`. Eighteen tools let the agent answer a
 question about the collection, and add a record to it.
 
-Eight read the shelf. Each one reads the static bundle, so an answer needs no
-network and no database query.
+Nine read the shelf. Each one but the last two in the table reads the static
+bundle, so an answer needs no network and no database query.
 
 | Tool | What it answers |
 |---|---|
@@ -80,9 +80,23 @@ network and no database query.
 | `vinyl_recent(limit)` | "What is new?" The records added most recently, newest first. |
 | `vinyl_pick(genre, decade, section, exclude_ids, avoid_days)` | "What do we put on?" One record the house owns, with a reason and the shelf section. A record suggested in the last two weeks waits its turn, and a record that is out with somebody is never suggested. |
 | `vinyl_lent_out()` | "Who has what?" Every record that is off the shelf, and with whom. |
+| `vinyl_played(limit)` | "What did we listen to lately?" The records played most recently, newest first, with the time of the last play and the number of plays. Only a play that was reported is listed. |
 | `vinyl_status()` | The record count, the time of the last sync, and its result. `GET /api/status` is the same report over plain HTTP. |
 
-Six write only to the local database, so none of them needs a Discogs token.
+Seven write only to the local database, so none of them needs a Discogs token.
+One records a play:
+
+| Tool | What it does |
+|---|---|
+| `vinyl_log_play(release_id)` | Records that a record is on the turntable now. A second report of the same record inside three hours is the same listen and adds nothing. |
+
+A turntable console can report a play with no MCP client: `POST /api/plays`
+with the JSON body `{"release_id": 7590859}`, and an optional `"source"` that
+names the console. `GET /api/plays?limit=10` returns the same list as
+`vinyl_played`. Both need `Authorization: Bearer <ADDON_TOKEN>` when
+`ADDON_TOKEN` is set, the same as `/mcp`. The play log is kept in the database
+and a sync never clears it.
+
 Two mark a record as out with somebody:
 
 | Tool | What it does |
